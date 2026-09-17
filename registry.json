@@ -1,0 +1,13 @@
+{
+  "_admin_key": "test123",
+  "hermes1": {
+    "url": "http://127.0.0.1:3221/a2a",
+    "skills": [],
+    "key_hash": "58109554ecc19a1f49eb55c22e1d90b5a39bed4562c4ce1e96a8cbf245a2a544"
+  },
+  "caller": {
+    "url": null,
+    "skills": [],
+    "key_hash": "fa8d43c721d1199522b48e06c0ada6e56776b062b9b991e3fccf1f01be2e7aad"
+  }
+}
