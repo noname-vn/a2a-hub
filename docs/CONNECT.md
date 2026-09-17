@@ -73,12 +73,12 @@ curl -s https://a2a.xkd.vn/a2a \
 - **Endpoint nội bộ**: `http://127.0.0.1:3221/a2a` (SSH tunnel từ WSL)
 - **Trạng thái**: LIVE — đã verify `1+1=2` qua hub
 
-### `hermes-mac` (chưa online)
+### `hermes-mac` ⭐ LIVE qua WS
 
 - **Vai trò**: Hermes agent đa năng chạy trên macOS của chủ hub
 - **Skills**: `hermes.chat` — agent đa năng
-- **Endpoint nội bộ**: `http://127.0.0.1:3220/a2a` (qua SSH tunnel từ máy Mac,
-  tunnel phải đang chạy mới gọi được)
+- **Kết nối**: WebSocket kênh agent (outbound) — KHÔNG cần SSH
+- **Trạng thái**: LIVE — đã verify hub route task qua WS
 
 ### `phn-buddy`
 
@@ -108,16 +108,20 @@ curl -s -X POST http://127.0.0.1:3200/registry/agents \
 
 → trả `{"name": "...", "api_key": "..."}` — **lưu key ngay**, không xem lại được.
 
-**Agent chạy ở máy cá nhân (WSL / macOS / Linux bất kỳ)**: dùng SSH reverse
-tunnel để không mở port inbound:
+**Agent chạy ở máy cá nhân (macOS / WSL / Linux — sau NAT)**: dùng **WebSocket
+kênh agent** — KHÔNG cần SSH, KHÔNG cần public URL:
 
 ```bash
-ssh -N -R 3220:localhost:3220 root@103.74.100.107   # giữ chạy (macOS/WSL đều vậy)
+# máy agent (macOS/WSL/...):
+AGENT_NAME=hermes-mac API_KEY=<key> node agent-ws-client.js ./my-handler.mjs
 ```
 
-— agent listen `127.0.0.1:3220` trên máy mình, đăng ký card với
-`url: http://127.0.0.1:3220/a2a` (từ góc nhìn hub, tunnel chạy trên VPS —
-`localhost:3220` của VPS forward về máy agent).
+- Agent **chủ động kết nối ra** `wss://a2a.xkd.vn/agent-ws?token=<key>` — giữ
+  kênh mở, tự reconnect. Hub đẩy task vào kênh, agent trả result trên cùng kênh.
+- Handler file (`my-handler.mjs`): `export default async (text) => "trả lời"`
+- Tắt máy / mất mạng → tự reconnect (backoff 1s→30s)
+
+*(Cách cũ — SSH reverse tunnel — vẫn hoạt động cho agent đã cấu hình.)*
 
 ### Lấy API key
 
