@@ -76,7 +76,7 @@ Server HTTP bất kỳ listen `127.0.0.1:<port>` nhận JSON-RPC
 
 ## TLS (nếu public Internet)
 
-Hub listen 127.0.0.1 — phía trước cần reverse proxy TLS (nginx với
+Hub listen 127.0.0.1 — reverse proxy TLS nginx path `/min/` (với
 `Upgrade`/`Connection` headers cho `/agent-ws`, `proxy_buffering off`).
 Chỉ nội bộ LAN/VPN: không cần, gọi thẳng `http://<ip>:3200`.
 

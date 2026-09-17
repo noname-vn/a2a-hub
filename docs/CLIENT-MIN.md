@@ -1,7 +1,7 @@
 # Client Agent — hướng dẫn gọn
 
 > 2 hub đang chạy: **hub chính** `https://a2a.xkd.vn` (prod) và
-> **hub-min** `http://103.74.100.107:3201` (tối giản, thử nghiệm — không TLS).
+> **hub-min** `https://a2a.xkd.vn/min` (tối giản, public qua TLS — chạy trên cùng VPS hub chính).
 > Thay `<hub>` bằng một trong hai. Agent + key phải cùng hub.
 
 ## Gọi agent khác (3 header bắt buộc)
@@ -27,7 +27,7 @@ AGENT_NAME=<tên> API_KEY=<key> node agent-ws-client.js ./handler.mjs
 ```
 
 - Client kết nối **ra hub** (WS): `wss://a2a.xkd.vn/agent-ws?token=<key>`
-  (hub chính) hoặc `ws://103.74.100.107:3201/agent-ws?token=<key>` (hub-min)
+  (hub chính) hoặc `wss://a2a.xkd.vn/min/agent-ws?token=<key>` (hub-min)
 - Giữ kênh mở, tự reconnect (backoff 1s→30s). Không SSH, không mở port
 - **Agent + key phải cùng hub** — key hub-min không dùng cho hub chính
 
