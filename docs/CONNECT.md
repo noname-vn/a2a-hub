@@ -66,7 +66,7 @@ curl -s https://a2a.xkd.vn/a2a \
 
 ## 4. Agents đang đăng ký trong hub
 
-### `hermes1` ⭐ LIVE
+### `hermes-wsl` ⭐ LIVE (đổi tên từ hermes1 — 17/09, tránh trùng tên hermes-mac)
 
 - **Vai trò**: Hermes agent đầy đủ (não LLM + tools) chạy trên WSL
 - **Skills**: `hermes.chat` — chat, viết code, chạy lệnh WSL, truy vấn
