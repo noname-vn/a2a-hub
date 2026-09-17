@@ -57,8 +57,22 @@ function agentNameByKey(key) {
   }
   return null;
 }
-function rpcError(id, code, message) {
-  return { jsonrpc: '2.0', id, error: { code, message } };
+// JSON-RPC + A2A v1.0 chuẩn (spec §5.4): A2A errors -32001..-32009
+const A2A_ERRORS = {
+  taskNotFound: -32001,
+  taskNotCancelable: -32002,
+  pushNotSupported: -32003,
+  unsupportedOperation: -32004,
+  contentTypeNotSupported: -32005,
+  invalidAgentResponse: -32006,
+  extendedCardNotConfigured: -32007,
+  extensionSupportRequired: -32008,
+  versionNotSupported: -32009,
+};
+function rpcError(id, code, message, data) {
+  const e = { code, message };
+  if (data != null) e.data = data;
+  return { jsonrpc: '2.0', id, error: e };
 }
 function isPrivateHost(host) {
   return (
@@ -89,13 +103,13 @@ function routeViaWs(agentName, rpc, timeoutMs = 300_000) {
   return new Promise((resolve) => {
     const ws = online.get(agentName);
     if (!ws || ws.readyState !== 1) {
-      resolve({ status: 502, body: JSON.stringify(rpcError(rpc.id, -32000, 'agent_offline')) });
+      resolve({ status: 502, body: JSON.stringify(rpcError(rpc.id, -32001, 'TaskNotFoundError: agent offline')) });
       return;
     }
     const key = `${agentName}:${rpc.id}`;
     const timer = setTimeout(() => {
       pending.delete(key);
-      resolve({ status: 504, body: JSON.stringify(rpcError(rpc.id, -32000, 'timeout')) });
+      resolve({ status: 504, body: JSON.stringify(rpcError(rpc.id, -32003, 'agent timeout (300s)')) });
     }, timeoutMs);
     pending.set(key, { resolve });
     ws.send(JSON.stringify({ type: 'task', rpc }));
@@ -179,17 +193,39 @@ const server = http.createServer(async (req, res) => {
     try {
       rpc = JSON.parse(body);
     } catch {
-      return res.writeHead(400).end();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(rpcError(null, -32700, 'JSONParseError: Invalid JSON payload')));
+    }
+    if (rpc.jsonrpc !== '2.0' || rpc.id == null || typeof rpc.method !== 'string') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(rpcError(rpc.id ?? null, -32600, 'InvalidRequestError: Request payload validation error')));
     }
     if (rateLimited(caller)) {
       res.writeHead(429, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(rpcError(rpc.id ?? null, -32000, 'rate limited (60/phút)')));
     }
+    const METHOD = rpc.method ?? '';
+    const SUPPORTED = ['SendMessage', 'message/send'];
+    if (!SUPPORTED.includes(METHOD)) {
+      // Streaming/push không hỗ trợ (card streaming:false) → UnsupportedOperationError
+      const unsupported = ['SendStreamingMessage', 'message/stream', 'SubscribeToTask', 'GetExtendedAgentCard'];
+      const code = unsupported.includes(METHOD) ? A2A_ERRORS.unsupportedOperation : -32601;
+      const msg = unsupported.includes(METHOD) ? 'UnsupportedOperationError' : 'MethodNotFoundError';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(rpcError(rpc.id, code, msg)));
+    }
+    // A2A-Version: chỉ hỗ trợ major 1 (v0.x cũng chấp nhận)
+    const ver = String(req.headers['a2a-version'] ?? '1.0');
+    const major = parseInt(ver.split('.')[0], 10);
+    if (Number.isNaN(major) || major > 1) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(rpcError(rpc.id, A2A_ERRORS.versionNotSupported, 'VersionNotSupportedError', { supported: '1.0', received: ver })));
+    }
     const target = req.headers['x-a2a-target'] ?? rpc.params?.target;
     const agent = target ? registry[target] : null;
     if (!agent) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(rpcError(rpc.id, -32000, 'agent_not_found')));
+      res.end(JSON.stringify(rpcError(rpc.id, -32001, 'TaskNotFoundError: agent khong ton tai (target sai / chua dang ky)')));
       return;
     }
 
@@ -242,12 +278,12 @@ const server = http.createServer(async (req, res) => {
         res.end(out);
       } catch (e) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(rpcError(rpc.id, -32000, `unreachable: ${e.message}`)));
+        res.end(JSON.stringify(rpcError(rpc.id, -32003, 'agent unreachable: ' + e.message)));
       }
       return;
     }
     res.writeHead(502, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(rpcError(rpc.id, -32000, 'agent_offline')));
+    res.end(JSON.stringify(rpcError(rpc.id, -32001, 'TaskNotFoundError: agent offline')));
     return;
   }
 

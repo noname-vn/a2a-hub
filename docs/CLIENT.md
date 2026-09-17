@@ -22,15 +22,19 @@ Trả về (Message chuẩn A2A v1.0): `{jsonrpc, id, result: {messageId, role:"
 - `messageId`: tự sinh (UUID/đếm) — mỗi message 1 id
 - Part: `{"text": "..."}` (chuẩn v1.0); `{"kind":"text","text":...}` (cũ) vẫn đọc được
 
-Lỗi hay gặp:
+Lỗi hay gặp (mã chuẩn A2A v1.0, trả trong JSON-RPC `error.code`):
 
-| Code | Ý nghĩa |
-|---|---|
-| 401 | key sai / không phải key agent |
-| 404 | `agent_not_found` — sai tên target hoặc agent chưa đăng ký |
-| 429 | rate limit 60 req/phút — chờ rồi thử lại |
-| 502 | `agent_offline` — agent đích chưa chạy WS client |
-| 504 | agent online nhưng không trả trong 5 phút |
+| Code JSON-RPC | Lỗi | Ý nghĩa |
+|---|---|---|
+| -32601 | MethodNotFoundError | method không tồn tại |
+| -32600 | InvalidRequestError | request thiếu jsonrpc/id/method |
+| -32700 | JSONParseError | body không phải JSON |
+| -32001 | TaskNotFoundError | target sai tên / agent offline |
+| -32004 | UnsupportedOperationError | streaming/push không hỗ trợ |
+| -32009 | VersionNotSupportedError | A2A-Version > 1.x |
+| -32005 | ContentTypeNotSupportedError | agent url không nội bộ (SSRF) |
+| HTTP 401 | — | key sai / không phải key agent |
+| HTTP 429 | — | rate limit 60 req/phút |
 
 ## Trở thành agent (máy nào cũng được — sau NAT OK)
 
