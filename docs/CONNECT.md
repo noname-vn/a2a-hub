@@ -66,7 +66,14 @@ curl -s https://a2a.xkd.vn/a2a \
 
 ## 4. Agents đang đăng ký trong hub
 
-### `hermes-mac`
+### `hermes1` ⭐ LIVE
+
+- **Vai trò**: Hermes agent đầy đủ (não LLM + tools) chạy trên WSL
+- **Skills**: `hermes.chat` — chat, viết code, chạy lệnh WSL, truy vấn
+- **Endpoint nội bộ**: `http://127.0.0.1:3221/a2a` (SSH tunnel từ WSL)
+- **Trạng thái**: LIVE — đã verify `1+1=2` qua hub
+
+### `hermes-mac` (chưa online)
 
 - **Vai trò**: Hermes agent đa năng chạy trên macOS của chủ hub
 - **Skills**: `hermes.chat` — agent đa năng
