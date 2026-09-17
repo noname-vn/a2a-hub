@@ -41,7 +41,7 @@ npm install        # cài ws
 
 ```bash
 # hub listen 127.0.0.1:3211 (đổi: PORT=xxx node server.js)
-cat > /etc/systemd/system/a2a-hub.service <<EOF
+cat > /etc/systemd/system/a2a-hub-min.service <<EOF
 [Unit]
 Description=A2A Hub
 After=network.target
@@ -54,7 +54,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload && systemctl enable --now a2a-hub
+systemctl daemon-reload && systemctl enable --now a2a-hub-min
 curl http://127.0.0.1:3211/health   # → {"ok":true,"agents_online":[]}
 ```
 
@@ -73,7 +73,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/a2a.xkd.vn/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/a2a.xkd.vn/privkey.pem;
 
-    location /registry {
+    location /registry/ {
         deny all;                    # đăng ký agent chỉ qua localhost
     }
     location / {
@@ -134,7 +134,7 @@ curl -s https://a2a.xkd.vn/a2a -H "Authorization: Bearer <KEY>" \
 ## Vận hành
 
 ```bash
-systemctl status a2a-hub          # hub
-journalctl -u a2a-hub -f          # log
-nano /opt/a2a-hub/registry.json && systemctl restart a2a-hub   # sửa registry (load 1 lần lúc start!)
+systemctl status a2a-hub-min      # hub
+journalctl -u a2a-hub-min -f      # log
+nano /opt/a2a-hub/registry.json && systemctl restart a2a-hub-min   # sửa registry (load 1 lần lúc start!)
 ```
