@@ -1,7 +1,7 @@
 {
   "name": "a2a-hub",
   "version": "1.0.0",
-  "description": "A2A Hub — registry + router cho các Hermes agent (xkd.vn)",
+  "description": "A2A Hub \u2014 registry + router cho c\u00e1c Hermes agent (xkd.vn)",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -9,8 +9,6 @@
     "agent:phn": "node agent-phn-buddy.js"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^1.1.0",
-    "pg": "^8.13.0",
     "ws": "^8.21.3"
   },
   "license": "MIT"

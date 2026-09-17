@@ -1,336 +1,267 @@
 /**
- * A2A Hub — registry + router + **WS agent channel** (phương án 1).
+ * A2A Hub — TỐI GIẢN + AN TOÀN TỐI THIỂU (public Internet).
  *
- * Mới (17/09): agents sau NAT (macOS/WSL cá nhân) KHÔNG cần SSH — kết nối
- * WebSocket ra hub với API key: wss://a2a.xkd.vn/agent-ws?token=<api-key>
+ * 1 file, duy nhất dependency `ws`. Registry = registry.json.
  *
- * Giao thức WS (bọc JSON-RPC A2A):
- *   Agent → Hub : {type:'hello', name:'<tên-đã-đăng-ký>'}
- *   Hub  → Agent: {type:'task', rpc:{jsonrpc:'2.0', id, method, params}}
- *   Agent → Hub : {type:'result', rpc:{jsonrpc:'2.0', id, result|error}}
- *   Hub  → Agent: {type:'ping'}  / Agent → Hub: {type:'pong'}
+ * An toàn tối thiểu (17/09):
+ * - Rate limit 60 req/phút per caller (in-memory)
+ * - Body limit 1MB (chặn OOM)
+ * - SSRF guard: agent.url chỉ chấp nhận loopback/private (tunnel nội bộ)
+ * - Admin key mạnh tự tạo (lưu registry.json), KHÔNG dùng key yếu
+ * - /registry chỉ qua localhost — reverse proxy phải chặn từ ngoài
  *
- * Route: message/send có X-A2A-Target (hoặc params.target) → agent WS online
- * → đẩy task qua WS, chờ result (timeout 300s) → trả client. Agent không
- * online → 502 agent_offline.
+ * Endpoint:
+ *   GET  /health
+ *   GET  /.well-known/agent-card.json
+ *   POST /a2a       — JSON-RPC message/send → route (WS ưu tiên, HTTP fallback)
+ *   POST /registry  — đăng ký agent (admin only, localhost)
+ *   GET  /registry  — danh sách (admin only)
+ *   WS   /agent-ws?token=<key> — kênh agent sau NAT
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { getDbPool } from './db.js';
 
-const PORT = process.env.PORT || 3200;
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const pool = getDbPool(process.env.DATABASE_URL);
+const PORT = Number(process.env.PORT || 3200);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REGISTRY_FILE = path.join(HERE, 'registry.json');
+const BODY_LIMIT = 1_000_000; // 1MB
 
-// Kênh WS của các agent đang online: name → ws
-const onlineAgents = new Map();
-// hàng đợi chờ result: key `${agent}:${rpcId}` → {resolve, timer}
-const pendingTasks = new Map();
+// ---- registry (JSON file) ----
+function loadRegistry() {
+  try {
+    return JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
+  } catch {
+    return { _admin_key: crypto.randomBytes(24).toString('hex') };
+  }
+}
+let registry = loadRegistry();
+if (!registry._admin_key || registry._admin_key.length < 32) {
+  registry._admin_key = crypto.randomBytes(24).toString('hex');
+}
+function saveRegistry() {
+  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2));
+}
+if (!fs.existsSync(REGISTRY_FILE)) saveRegistry();
 
-function hashKey(key) {
+function hash(key) {
   return crypto.createHash('sha256').update(key).digest('hex');
 }
-
-function bearer(req) {
-  const h = req.headers.authorization ?? '';
-  return h.startsWith('Bearer ') ? h.slice(7) : null;
+function agentNameByKey(key) {
+  if (key && key === registry._admin_key) return { admin: true };
+  for (const [name, a] of Object.entries(registry)) {
+    if (name !== '_admin_key' && a.key_hash === hash(key)) return { name };
+  }
+  return null;
 }
-
-async function auth(req) {
-  const key = bearer(req);
-  if (!key) return null;
-  if (ADMIN_KEY && key === ADMIN_KEY) return { admin: true };
-  const { rows } = await pool.query(
-    'SELECT * FROM agents WHERE api_key_hash = $1 AND enabled = true',
-    [hashKey(key)],
-  );
-  if (rows.length === 0) return null;
-  return { agent: rows[0] };
-}
-
 function rpcError(id, code, message) {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
+function isPrivateHost(host) {
+  return (
+    /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|::1|\[::1\])/.test(host) ||
+    host.endsWith('.local')
+  );
+}
 
-/** Gửi task tới agent online qua WS — chờ result (Promise) */
+// ---- rate limit (in-memory, 60/phút per caller) ----
+const rateLimit = new Map();
+function rateLimited(caller) {
+  const now = Date.now();
+  const list = (rateLimit.get(caller) ?? []).filter((t) => now - t < 60_000);
+  if (list.length >= 60) {
+    rateLimit.set(caller, list);
+    return true;
+  }
+  list.push(now);
+  rateLimit.set(caller, list);
+  return false;
+}
+
+// ---- WS kênh agent ----
+const online = new Map(); // name → ws
+const pending = new Map(); // `${agent}:${rpcId}` → {resolve, timer}
+
 function routeViaWs(agentName, rpc, timeoutMs = 300_000) {
   return new Promise((resolve) => {
-    const ws = onlineAgents.get(agentName);
+    const ws = online.get(agentName);
     if (!ws || ws.readyState !== 1) {
       resolve({ status: 502, body: JSON.stringify(rpcError(rpc.id, -32000, 'agent_offline')) });
       return;
     }
     const key = `${agentName}:${rpc.id}`;
     const timer = setTimeout(() => {
-      pendingTasks.delete(key);
-      resolve({ status: 504, body: JSON.stringify(rpcError(rpc.id, -32000, 'agent timeout')) });
+      pending.delete(key);
+      resolve({ status: 504, body: JSON.stringify(rpcError(rpc.id, -32000, 'timeout')) });
     }, timeoutMs);
-    pendingTasks.set(key, { resolve, ws });
+    pending.set(key, { resolve });
     ws.send(JSON.stringify({ type: 'task', rpc }));
   });
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  const key = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+  const who = agentNameByKey(key);
+  const isAdmin = who?.admin === true;
+  const caller = who?.admin ? 'admin' : who?.name;
 
-  if (url.pathname === '/.well-known/agent-card.json' && req.method === 'GET') {
-    const card = {
-      name: 'A2A Hub xkd.vn',
-      description:
-        'Hub registry + router — kết nối các Hermes agent qua A2A protocol v1.0',
-      version: '1.1.0',
-      protocolVersion: '1.0',
-      url: 'https://a2a.xkd.vn/a2a',
-      capabilities: { streaming: true, pushNotifications: false },
-      defaultInputModes: ['text/plain', 'application/json'],
-      defaultOutputModes: ['text/plain', 'application/json'],
-      skills: [
-        { id: 'registry.lookup', name: 'Agent registry lookup' },
-        { id: 'route.task', name: 'Route task tới agent đã đăng ký' },
-        { id: 'agent.ws', name: 'Agent WS channel — agent sau NAT không cần SSH' },
-      ],
-      securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } },
-      security: [{ bearer: [] }],
-    };
+  if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(card));
+    res.end(JSON.stringify({ ok: true, agents_online: [...online.keys()] }));
     return;
   }
 
-  if (url.pathname.startsWith('/registry/')) {
-    const authz = await auth(req);
-    if (!authz?.admin) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'forbidden' }));
-      return;
-    }
-    if (url.pathname === '/registry/agents' && req.method === 'POST') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      const { name, card, key } = JSON.parse(body);
-      const apiKey = crypto.randomBytes(24).toString('hex');
-      await pool.query(
-        `INSERT INTO agents (name, agent_card, api_key_hash, enabled)
-         VALUES ($1, $2, $3, true)
-         ON CONFLICT (name) DO UPDATE SET agent_card = $2, api_key_hash = $3, enabled = true`,
-        [name, card, hashKey(apiKey)],
-      );
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ name, api_key: apiKey }));
-      return;
-    }
-    if (url.pathname === '/registry/agents' && req.method === 'GET') {
-      const { rows } = await pool.query(
-        'SELECT name, agent_card, enabled, last_seen FROM agents ORDER BY name',
-      );
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ agents: rows }));
-      return;
-    }
-    res.writeHead(404).end();
+  if (url.pathname === '/.well-known/agent-card.json') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      name: 'A2A Hub (minimal)',
+      protocolVersion: '1.0',
+      capabilities: { streaming: false, pushNotifications: false },
+      defaultInputModes: ['text/plain'],
+      defaultOutputModes: ['text/plain'],
+    }));
     return;
   }
 
-  if (url.pathname.startsWith('/a2a')) {
-    const authz = await auth(req);
-    if (!authz) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
+  if (url.pathname === '/registry' && req.method === 'POST') {
+    if (!isAdmin) return res.writeHead(403).end();
     let body = '';
-    for await (const chunk of req) body += chunk;
+    for await (const c of req) body += c;
+    if (body.length > BODY_LIMIT) return res.writeHead(413).end();
+    const { name, url: agentUrl, skills } = JSON.parse(body);
+    if (!name) return res.writeHead(400).end();
+    const apiKey = crypto.randomBytes(24).toString('hex');
+    registry[name] = {
+      url: agentUrl ?? null,
+      skills: skills ?? [],
+      key_hash: hash(apiKey),
+    };
+    saveRegistry();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ name, api_key: apiKey }));
+    return;
+  }
+
+  if (url.pathname === '/registry' && req.method === 'GET') {
+    if (!isAdmin) return res.writeHead(403).end();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(
+      Object.fromEntries(Object.entries(registry).filter(([k]) => k !== '_admin_key')),
+    ));
+    return;
+  }
+
+  if (url.pathname === '/a2a' && req.method === 'POST') {
+    if (!who) return res.writeHead(401).end();
+    let body = '';
+    for await (const c of req) {
+      body += c;
+      if (body.length > BODY_LIMIT) return res.writeHead(413).end();
+    }
     let rpc;
     try {
       rpc = JSON.parse(body);
     } catch {
-      res.writeHead(400).end();
-      return;
+      return res.writeHead(400).end();
     }
-    const target = req.headers['x-a2a-target'] ?? rpc.params?.target ?? null;
-    if (!target) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'missing target' }));
-      return;
+    if (rateLimited(caller)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(rpcError(rpc.id ?? null, -32000, 'rate limited (60/phút)')));
     }
-    const { rows } = await pool.query(
-      'SELECT * FROM agents WHERE name = $1 AND enabled = true',
-      [target],
-    );
-    const agent = rows[0] ?? null;
+    const target = req.headers['x-a2a-target'] ?? rpc.params?.target;
+    const agent = target ? registry[target] : null;
     if (!agent) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'agent_not_found' }));
+      res.end(JSON.stringify(rpcError(rpc.id, -32000, 'agent_not_found')));
       return;
     }
 
-    // Ưu tiên WS channel nếu agent online — không thì fetch HTTP nội bộ
-    if (onlineAgents.has(target)) {
+    // 1) WS agent online → đẩy qua WS, chờ result
+    const ws = online.get(target);
+    if (ws && ws.readyState === 1) {
       const out = await routeViaWs(target, rpc);
       res.writeHead(out.status, { 'Content-Type': 'application/json' });
       res.end(out.body);
-      void pool.query('UPDATE agents SET last_seen = now() WHERE name = $1', [target]);
       return;
     }
 
-    const agentUrl = agent.agent_card?.url;
-    if (!agentUrl) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'agent_not_found' }));
+    // 2) HTTP agent → fetch url — SSRF guard: chỉ loopback/private
+    if (agent.url) {
+      let host = null;
+      try {
+        host = new URL(agent.url).hostname;
+      } catch {}
+      if (!host || !isPrivateHost(host)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(rpcError(rpc.id, -32000, 'agent url phải là địa chỉ nội bộ')));
+      }
+      try {
+        const fwd = await fetch(agent.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(rpc),
+        });
+        res.writeHead(fwd.status, { 'Content-Type': 'application/json' });
+        res.end(await fwd.text());
+      } catch (e) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rpcError(rpc.id, -32000, `unreachable: ${e.message}`)));
+      }
       return;
     }
-    try {
-      const fwd = await fetch(agentUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Hub-Agent': agent.name },
-        body: JSON.stringify(rpc),
-      });
-      const respBody = await fwd.text();
-      res.writeHead(fwd.status, { 'Content-Type': 'application/json' });
-      res.end(respBody);
-    } catch (e) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        jsonrpc: '2.0',
-        id: rpc?.id ?? null,
-        error: { code: -32000, message: `agent unreachable: ${e.message}` },
-      }));
-    }
-    void pool.query('UPDATE agents SET last_seen = now() WHERE name = $1', [target]);
-    return;
-  }
-
-  if (url.pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: true,
-      service: 'a2a-hub',
-      agents_online: [...onlineAgents.keys()],
-    }));
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(rpcError(rpc.id, -32000, 'agent_offline')));
     return;
   }
 
   res.writeHead(404).end();
 });
 
-// ---- WebSocket kênh agent (auth bằng API key qua query) ----
+// ---- WS server ----
 const wss = new WebSocketServer({ noServer: true });
 
-server.on('upgrade', async (req, socket, head) => {
+server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  if (url.pathname !== '/agent-ws') {
-    socket.destroy();
-    return;
-  }
+  if (url.pathname !== '/agent-ws') return socket.destroy();
   const key = url.searchParams.get('token');
-  if (!key) {
-    socket.destroy();
-    return;
-  }
-  if (ADMIN_KEY && key === ADMIN_KEY) {
-    socket.destroy(); // admin không dùng WS agent
-    return;
-  }
-  const { rows } = await pool.query(
-    'SELECT * FROM agents WHERE api_key_hash = $1 AND enabled = true',
-    [hashKey(key)],
-  );
-  if (rows.length === 0) {
-    socket.destroy();
-    return;
-  }
+  const who = key ? agentNameByKey(key) : null;
+  if (!who || who.admin) return socket.destroy();
+  const name = who.name;
   wss.handleUpgrade(req, socket, head, (ws) => {
-    ws.agentName = rows[0].name;
-    wss.emit('connection', ws, req);
-  });
-});
-
-wss.on('connection', (ws, req) => {
-  // agent PHẢI gửi hello với name khớp agent đã đăng ký bằng key của nó
-  ws.once('message', (data) => {
-    let hello;
-    try {
-      hello = JSON.parse(data.toString());
-    } catch {
-      ws.close();
-      return;
-    }
-    if (hello.type !== 'hello' || !hello.name) {
-      ws.close();
-      return;
-    }
-    // name phải khớp agent sở hữu key (tránh giả mạo tên agent khác)
-    const url = new URL(req.url, 'http://localhost');
-    const key = url.searchParams.get('token');
-    void pool
-      .query('SELECT name FROM agents WHERE api_key_hash = $1 AND enabled = true', [hashKey(key)])
-      .then(({ rows }) => {
-        if (rows.length === 0 || rows[0].name !== hello.name) {
-          ws.close();
-          return;
+    // 1 agent = 1 connection — connection mới đá cũ (tranh chấp tên)
+    const old = online.get(name);
+    if (old && old !== ws) old.close();
+    online.set(name, ws);
+    ws.send(JSON.stringify({ type: 'welcome', name }));
+    ws.on('message', (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (msg.type === 'result' && msg.rpc?.id != null) {
+        const p = pending.get(`${name}:${msg.rpc.id}`);
+        if (p) {
+          clearTimeout(p.timer);
+          pending.delete(`${name}:${msg.rpc.id}`);
+          p.resolve({ status: 200, body: JSON.stringify(msg.rpc) });
         }
-        ws.agentName = hello.name;
-        const old = onlineAgents.get(ws.agentName);
-        if (old && old !== ws) old.close();
-        onlineAgents.set(ws.agentName, ws);
-        console.log(`[a2a-hub] agent online: ${ws.agentName}`);
-        ws.send(JSON.stringify({ type: 'welcome', name: ws.agentName }));
-
-        ws.on('message', (data) => {
-          let msg;
-          try {
-            msg = JSON.parse(data.toString());
-          } catch {
-            return;
-          }
-          if (msg.type === 'result' && msg.rpc?.id != null) {
-            const key2 = `${ws.agentName}:${msg.rpc.id}`;
-            const pending = pendingTasks.get(key2);
-            if (pending) {
-              clearTimeout(pending.timer);
-              pendingTasks.delete(key2);
-              pending.resolve({
-                status: 200,
-                body: JSON.stringify(msg.rpc),
-              });
-            }
-          } else if (msg.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong' }));
-          }
-        });
-
-        ws.on('close', () => {
-          if (onlineAgents.get(ws.agentName) === ws) {
-            onlineAgents.delete(ws.agentName);
-            console.log(`[a2a-hub] agent offline: ${ws.agentName}`);
-          }
-        });
-        ws.on('error', () => {});
-      });
+      } else if (msg.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      }
+    });
+    ws.on('close', () => {
+      if (online.get(name) === ws) online.delete(name);
+    });
+    ws.on('error', () => {});
   });
 });
 
-async function ensureSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS agents (
-      name         text PRIMARY KEY,
-      agent_card   jsonb NOT NULL,
-      api_key_hash text NOT NULL,
-      enabled      boolean NOT NULL DEFAULT true,
-      last_seen    timestamptz
-    );
-  `);
-  console.log('[a2a-hub] schema ok');
-}
-
-ensureSchema()
-  .then(() => {
-    server.listen(PORT, '127.0.0.1', () => {
-      console.log(`[a2a-hub] listening on 127.0.0.1:${PORT}`);
-    });
-  })
-  .catch((e) => {
-    console.error('[a2a-hub] schema lỗi:', e.message);
-    process.exit(1);
-  });
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[a2a-hub-min] 127.0.0.1:${PORT} — admin key trong registry.json (_admin_key)`);
+});
