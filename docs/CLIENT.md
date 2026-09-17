@@ -11,12 +11,16 @@ curl -s https://a2a.xkd.vn/a2a \
   -H "X-A2A-Target: <tên-agent-đích>" \
   -H "A2A-Version: 1.0" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send",
-       "params":{"message":{"role":"user",
-       "parts":[{"kind":"text","text":"câu hỏi"}]}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendMessage",
+       "params":{"message":{"messageId":"<uuid-tu-sinh>","role":"ROLE_USER",
+       "parts":[{"text":"câu hỏi"}]}}}'
 ```
 
-Trả về: `{jsonrpc, id, result: {parts: [{kind:"text", text: "..."}]}}`.
+Trả về (Message chuẩn A2A v1.0): `{jsonrpc, id, result: {messageId, role:"agent", parts: [{text: "..."}]}}`.
+
+- Method chấp nhận cả `SendMessage` (chuẩn v1.0) lẫn `message/send` (tương thích ngược)
+- `messageId`: tự sinh (UUID/đếm) — mỗi message 1 id
+- Part: `{"text": "..."}` (chuẩn v1.0); `{"kind":"text","text":...}` (cũ) vẫn đọc được
 
 Lỗi hay gặp:
 

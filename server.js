@@ -118,11 +118,24 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/.well-known/agent-card.json') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      name: 'A2A Hub (minimal)',
+      name: 'A2A Hub',
+      description: 'A2A hub - cac agent thay nhau va trao doi qua hub (message/send dong bo)',
+      version: '1.0.0',
       protocolVersion: '1.0',
+      supportedInterfaces: [
+        { url: 'https://a2a.xkd.vn', protocolBinding: 'JSONRPC', protocolVersion: '1.0' },
+      ],
       capabilities: { streaming: false, pushNotifications: false },
       defaultInputModes: ['text/plain'],
       defaultOutputModes: ['text/plain'],
+      skills: [
+        {
+          id: 'message-routing',
+          name: 'Message routing',
+          description: 'Route message/send toi agent dich (WS uu tien, HTTP fallback)',
+          tags: ['routing', 'hub'],
+        },
+      ],
     }));
     return;
   }
@@ -205,8 +218,28 @@ const server = http.createServer(async (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(rpc),
         });
+        const txt = await fwd.text();
+        let out;
+        try {
+          const parsed = JSON.parse(txt);
+          const rp = parsed.result ?? parsed;
+          let answer = '';
+          for (const part of rp.parts ?? []) {
+            if (typeof part === 'string') answer += part;
+            else if (typeof part?.text === 'string') answer += part.text;
+          }
+          if (!answer && typeof rp === 'string') answer = rp;
+          if (!answer) answer = JSON.stringify(rp ?? '');
+          out = JSON.stringify({
+            jsonrpc: parsed.jsonrpc ?? '2.0',
+            id: parsed.id,
+            result: { messageId: 'msg-' + Date.now(), role: 'agent', parts: [{ text: answer }] },
+          });
+        } catch {
+          out = txt;
+        }
         res.writeHead(fwd.status, { 'Content-Type': 'application/json' });
-        res.end(await fwd.text());
+        res.end(out);
       } catch (e) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(rpcError(rpc.id, -32000, `unreachable: ${e.message}`)));
@@ -249,7 +282,28 @@ server.on('upgrade', (req, socket, head) => {
         if (p) {
           clearTimeout(p.timer);
           pending.delete(`${name}:${msg.rpc.id}`);
-          p.resolve({ status: 200, body: JSON.stringify(msg.rpc) });
+          // Chuẩn hóa reply thành Message A2A v1.0 (messageId + Part text-only)
+          const rpcIn = msg.rpc;
+          let answer = '';
+          const partsIn = rpcIn.result?.parts ?? rpcIn.result?.content ?? [];
+          for (const part of partsIn) {
+            if (typeof part === 'string') answer += part;
+            else if (typeof part?.text === 'string') answer += part.text;
+          }
+          if (!answer && typeof rpcIn.result === 'string') answer = rpcIn.result;
+          if (!answer) answer = JSON.stringify(rpcIn.result ?? '');
+          p.resolve({
+            status: 200,
+            body: JSON.stringify({
+              jsonrpc: rpcIn.jsonrpc ?? '2.0',
+              id: rpcIn.id,
+              result: {
+                messageId: 'msg-' + Date.now(),
+                role: 'agent',
+                parts: [{ text: answer }],
+              },
+            }),
+          });
         }
       } else if (msg.type === 'ping') {
         ws.send(JSON.stringify({ type: 'pong' }));
