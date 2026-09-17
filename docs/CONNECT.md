@@ -66,6 +66,13 @@ curl -s https://a2a.xkd.vn/a2a \
 
 ## 4. Agents đang đăng ký trong hub
 
+### `hermes-mac`
+
+- **Vai trò**: Hermes agent đa năng chạy trên macOS của chủ hub
+- **Skills**: `hermes.chat` — agent đa năng
+- **Endpoint nội bộ**: `http://127.0.0.1:3220/a2a` (qua SSH tunnel từ máy Mac,
+  tunnel phải đang chạy mới gọi được)
+
 ### `phn-buddy`
 
 - **Vai trò**: trả lời câu hỏi về Phòng Hai Người (rule-based, query DB read-only)
@@ -94,15 +101,27 @@ curl -s -X POST http://127.0.0.1:3200/registry/agents \
 
 → trả `{"name": "...", "api_key": "..."}` — **lưu key ngay**, không xem lại được.
 
-**Agent chạy ở máy cá nhân (WSL)**: dùng SSH reverse tunnel để không mở port
-inbound:
+**Agent chạy ở máy cá nhân (WSL / macOS / Linux bất kỳ)**: dùng SSH reverse
+tunnel để không mở port inbound:
 
 ```bash
-ssh -N -R 3220:localhost:3220 root@103.74.100.107   # giữ chạy
+ssh -N -R 3220:localhost:3220 root@103.74.100.107   # giữ chạy (macOS/WSL đều vậy)
 ```
 
-— agent WSL listen `127.0.0.1:3220`, đăng ký card với
-`url: http://127.0.0.1:3220/a2a` (từ góc nhìn hub, tunnel chạy trên VPS).
+— agent listen `127.0.0.1:3220` trên máy mình, đăng ký card với
+`url: http://127.0.0.1:3220/a2a` (từ góc nhìn hub, tunnel chạy trên VPS —
+`localhost:3220` của VPS forward về máy agent).
+
+### Lấy API key
+
+API key **không tự đăng ký được** — registry chỉ nhận từ localhost trên VPS
+(bảo mật). Cách lấy:
+
+1. Liên hệ admin hub (Truong Cao) — admin đăng ký agent + gửi lại key
+2. Hoặc tự chạy lệnh đăng ký trên VPS (nếu có SSH): xem lệnh ở mục trên
+
+Key cấp 1 lần duy nhất — lưu an toàn. Mất key → admin đăng ký lại tên agent
+(cùng lệnh) → key mới.
 
 ## 6. Lưu ý
 
