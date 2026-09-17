@@ -1,18 +1,22 @@
 /**
- * A2A Hub — TỐI GIẢN. 1 file, duy nhất dependency `ws`.
+ * A2A Hub — TỐI GIẢN + AN TOÀN TỐI THIỂU (public Internet).
  *
- * Registry = registry.json cạnh file này. Không DB, không SDK A2A.
+ * 1 file, duy nhất dependency `ws`. Registry = registry.json.
  *
- * HTTP:
- *   GET  /health                        → {ok, agents_online}
- *   GET  /.well-known/agent-card.json   → card hub (tương thích A2A)
- *   POST /a2a                           — JSON-RPC message/send → route
- *   POST /registry                      — đăng ký agent (Bearer ADMIN_KEY)
- *   GET  /registry                      — danh sách (Bearer ADMIN_KEY)
- *   WS   /agent-ws?token=<key>          — kênh agent (hello/task/result)
+ * An toàn tối thiểu (17/09):
+ * - Rate limit 60 req/phút per caller (in-memory)
+ * - Body limit 1MB (chặn OOM)
+ * - SSRF guard: agent.url chỉ chấp nhận loopback/private (tunnel nội bộ)
+ * - Admin key mạnh tự tạo (lưu registry.json), KHÔNG dùng key yếu
+ * - /registry chỉ qua localhost — reverse proxy phải chặn từ ngoài
  *
- * Auth: Bearer key (sha256 hash lưu registry.json) + WS hello.name
- * phải khớp agent sở hữu key.
+ * Endpoint:
+ *   GET  /health
+ *   GET  /.well-known/agent-card.json
+ *   POST /a2a       — JSON-RPC message/send → route (WS ưu tiên, HTTP fallback)
+ *   POST /registry  — đăng ký agent (admin only, localhost)
+ *   GET  /registry  — danh sách (admin only)
+ *   WS   /agent-ws?token=<key> — kênh agent sau NAT
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -24,6 +28,7 @@ import { WebSocketServer } from 'ws';
 const PORT = Number(process.env.PORT || 3200);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REGISTRY_FILE = path.join(HERE, 'registry.json');
+const BODY_LIMIT = 1_000_000; // 1MB
 
 // ---- registry (JSON file) ----
 function loadRegistry() {
@@ -34,13 +39,14 @@ function loadRegistry() {
   }
 }
 let registry = loadRegistry();
-if (!registry._admin_key) {
+if (!registry._admin_key || registry._admin_key.length < 32) {
   registry._admin_key = crypto.randomBytes(24).toString('hex');
-  saveRegistry(); // ghi ngay — admin key đọc từ file, không chỉ in RAM
 }
 function saveRegistry() {
   fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2));
 }
+if (!fs.existsSync(REGISTRY_FILE)) saveRegistry();
+
 function hash(key) {
   return crypto.createHash('sha256').update(key).digest('hex');
 }
@@ -53,6 +59,26 @@ function agentNameByKey(key) {
 }
 function rpcError(id, code, message) {
   return { jsonrpc: '2.0', id, error: { code, message } };
+}
+function isPrivateHost(host) {
+  return (
+    /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|::1|\[::1\])/.test(host) ||
+    host.endsWith('.local')
+  );
+}
+
+// ---- rate limit (in-memory, 60/phút per caller) ----
+const rateLimit = new Map();
+function rateLimited(caller) {
+  const now = Date.now();
+  const list = (rateLimit.get(caller) ?? []).filter((t) => now - t < 60_000);
+  if (list.length >= 60) {
+    rateLimit.set(caller, list);
+    return true;
+  }
+  list.push(now);
+  rateLimit.set(caller, list);
+  return false;
 }
 
 // ---- WS kênh agent ----
@@ -81,6 +107,7 @@ const server = http.createServer(async (req, res) => {
   const key = (req.headers.authorization ?? '').replace(/^Bearer /, '');
   const who = agentNameByKey(key);
   const isAdmin = who?.admin === true;
+  const caller = who?.admin ? 'admin' : who?.name;
 
   if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -104,6 +131,7 @@ const server = http.createServer(async (req, res) => {
     if (!isAdmin) return res.writeHead(403).end();
     let body = '';
     for await (const c of req) body += c;
+    if (body.length > BODY_LIMIT) return res.writeHead(413).end();
     const { name, url: agentUrl, skills } = JSON.parse(body);
     if (!name) return res.writeHead(400).end();
     const apiKey = crypto.randomBytes(24).toString('hex');
@@ -130,12 +158,19 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/a2a' && req.method === 'POST') {
     if (!who) return res.writeHead(401).end();
     let body = '';
-    for await (const c of req) body += c;
+    for await (const c of req) {
+      body += c;
+      if (body.length > BODY_LIMIT) return res.writeHead(413).end();
+    }
     let rpc;
     try {
       rpc = JSON.parse(body);
     } catch {
       return res.writeHead(400).end();
+    }
+    if (rateLimited(caller)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(rpcError(rpc.id ?? null, -32000, 'rate limited (60/phút)')));
     }
     const target = req.headers['x-a2a-target'] ?? rpc.params?.target;
     const agent = target ? registry[target] : null;
@@ -153,8 +188,17 @@ const server = http.createServer(async (req, res) => {
       res.end(out.body);
       return;
     }
-    // 2) HTTP agent → fetch url
+
+    // 2) HTTP agent → fetch url — SSRF guard: chỉ loopback/private
     if (agent.url) {
+      let host = null;
+      try {
+        host = new URL(agent.url).hostname;
+      } catch {}
+      if (!host || !isPrivateHost(host)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(rpcError(rpc.id, -32000, 'agent url phải là địa chỉ nội bộ')));
+      }
       try {
         const fwd = await fetch(agent.url, {
           method: 'POST',
@@ -188,7 +232,9 @@ server.on('upgrade', (req, socket, head) => {
   if (!who || who.admin) return socket.destroy();
   const name = who.name;
   wss.handleUpgrade(req, socket, head, (ws) => {
-    ws.agentName = name;
+    // 1 agent = 1 connection — connection mới đá cũ (tranh chấp tên)
+    const old = online.get(name);
+    if (old && old !== ws) old.close();
     online.set(name, ws);
     ws.send(JSON.stringify({ type: 'welcome', name }));
     ws.on('message', (data) => {

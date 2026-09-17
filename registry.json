@@ -1,13 +1,13 @@
 {
-  "_admin_key": "test123",
-  "hermes1": {
-    "url": "http://127.0.0.1:3221/a2a",
-    "skills": [],
-    "key_hash": "58109554ecc19a1f49eb55c22e1d90b5a39bed4562c4ce1e96a8cbf245a2a544"
-  },
+  "_admin_key": "28faea4138de71c7dd9111e61b10701f0963a4064b5a47a4",
   "caller": {
     "url": null,
     "skills": [],
-    "key_hash": "8ee095c431839343acf87376076f0be03ee5a3560f2dc9963aab1b2cb2ca197a"
+    "key_hash": "80ada8bd180f282ade6019a32915ef0feb77be5fe9cac0d393d2feb65efc9796"
+  },
+  "caller3": {
+    "url": null,
+    "skills": [],
+    "key_hash": "66ac8068a91d3b862472d3212239a19ed23021d3229998bfc1a9e11361f2c185"
   }
 }

@@ -4,6 +4,14 @@
 > registry = JSON file. Đủ cho: agents thấy nhau + nói chuyện qua hub.
 > KHÔNG có: SDK A2A, DB, task lifecycle, streaming.
 
+## An toàn tối thiểu (có sẵn)
+
+- **Rate limit** 60 req/phút per caller — vượt trả 429
+- **Body limit** 1MB — chặn OOM
+- **SSRF guard** — agent.url chỉ chấp nhận loopback/private (không fetch URL public)
+- **Admin key** mạnh 48 ký tự tự tạo, lưu `registry.json` (`_admin_key`)
+- **/registry** cần admin key — reverse proxy phải chặn `/registry` từ ngoài
+
 ## Chạy
 
 ```bash
