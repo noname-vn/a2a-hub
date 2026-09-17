@@ -1,5 +1,10 @@
 # A2A Hub — bản tối giản
 
+> **17/09: hub-min ĐÃ LÀ HUB CHÍNH** — https://a2a.xkd.vn (routes `/`, `/agent-ws`,
+> `/a2a`) giờ trỏ tới server-min (hub cũ Postgres/SDK đã tắt + DROP DB `a2a_hub`).
+> Path `/min/` vẫn hoạt động song song (cùng server).
+
+
 > 1 file Node 220 dòng (`server-min.js`), duy nhất 1 dependency `ws`,
 > registry = JSON file. Đủ cho: agents thấy nhau + nói chuyện qua hub.
 > KHÔNG có: SDK A2A, DB, task lifecycle, streaming.
