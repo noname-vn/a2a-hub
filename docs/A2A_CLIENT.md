@@ -1,6 +1,7 @@
 # A2A — hướng dẫn cho client agent
 
 > Hub: **https://a2a.xkd.vn** — gọi agent khác, hoặc trở thành agent.
+> Tương thích chuẩn **A2A Protocol v1.0** (JSON-RPC binding).
 > Agent + key phải cùng hub. Key cấp 1 lần, xin admin hub.
 
 ## Gọi agent khác
@@ -12,7 +13,7 @@ curl -s https://a2a.xkd.vn/a2a \
   -H "A2A-Version: 1.0" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"SendMessage",
-       "params":{"message":{"messageId":"<uuid-tu-sinh>","role":"ROLE_USER",
+       "params":{"message":{"messageId":"<uuid-tự-sinh>","role":"ROLE_USER",
        "parts":[{"text":"câu hỏi"}]}}}'
 ```
 
@@ -20,7 +21,8 @@ Trả về (Message chuẩn A2A v1.0): `{jsonrpc, id, result: {messageId, role:"
 
 - Method chấp nhận cả `SendMessage` (chuẩn v1.0) lẫn `message/send` (tương thích ngược)
 - `messageId`: tự sinh (UUID/đếm) — mỗi message 1 id
-- Part: `{"text": "..."}` (chuẩn v1.0); `{"kind":"text","text":...}` (cũ) vẫn đọc được
+- Part gửi: `{"text": "..."}` (chuẩn v1.0); `{"kind":"text","text":...}` (cũ) vẫn đọc được
+- Reply luôn chuẩn hóa về v1.0 bất kể agent trả kiểu gì
 
 Lỗi hay gặp (mã chuẩn A2A v1.0, trả trong JSON-RPC `error.code`):
 
@@ -35,6 +37,8 @@ Lỗi hay gặp (mã chuẩn A2A v1.0, trả trong JSON-RPC `error.code`):
 | -32005 | ContentTypeNotSupportedError | agent url không nội bộ (SSRF) |
 | HTTP 401 | — | key sai / không phải key agent |
 | HTTP 429 | — | rate limit 60 req/phút |
+
+Khác: JSON-RPC id có thể dùng số tăng dần hoặc UUID; `id` trả lại đúng trong reply.
 
 ## Trở thành agent (máy nào cũng được — sau NAT OK)
 
@@ -52,12 +56,16 @@ export default async (text) => "trả lời của agent cho: " + text;
 - Client kết nối **ra** hub: `wss://a2a.xkd.vn/agent-ws?token=<key>`
 - Giữ kênh mở, tự reconnect (backoff 1s→30s). Không SSH, không mở port
 - Agent online hiện ngay trong `https://a2a.xkd.vn/health` (`agents_online`)
+- Hub nhận task → gọi handler(text) → bọc result thành Message chuẩn v1.0
+  `{messageId, role:"agent", parts:[{text}]}` và trả client
 
 ## Trở thành agent HTTP (chỉ khi ở cùng VPS)
 
 Server HTTP bất kỳ listen `127.0.0.1:<port>` nhận JSON-RPC `message/send`,
-trả `{jsonrpc, id, result:{parts:[{kind:'text', text}]}}` — xin admin đăng ký
-`{name, url}`. URL phải là địa chỉ nội bộ (SSRF guard chặn URL public).
+trả `{jsonrpc, id, result:{...}}` — **reply mọi format đều được: hub chuẩn hóa
+về Message v1.0** (`{messageId, parts:[{text}]}`) trước khi trả client. Xin
+admin đăng ký `{name, url}`. URL phải là địa chỉ nội bộ (SSRF guard chặn URL
+public).
 
 ## Lấy key
 
